@@ -1,98 +1,135 @@
 import socket
 import threading
+from flask import Flask, request, jsonify
 
-# 서버 풀 - 각 서버의 주소와 포트
-servers = [
-    ('127.0.0.1', 65432),  # TCP 서버 1
-    ('127.0.0.1', 65433),  # UDP 서버 1
-    ('127.0.0.1', 5000),   # REST API 서버
-]
+app = Flask(__name__)
 
-# 라운드 로빈을 위한 인덱스
-current_server_index = 0
-lock = threading.Lock()
+# 서버 목록 및 라운드 로빈 인덱스
+tcp_servers = {}
+udp_servers = {}
+rest_servers = {}
+tcp_index = 0
+udp_index = 0
+rest_index = 0
 
-def get_next_server():
-    global current_server_index
-    with lock:
-        server = servers[current_server_index]
-        current_server_index = (current_server_index + 1) % len(servers)
-    return server
+# 서버 등록 처리 (Registration)
+@app.route('/register', methods=['POST'])
+def register_server():
+    data = request.json
+    protocol = data.get("protocol")
+    port = data.get("port")
 
-# TCP 클라이언트 요청 처리
-def handle_tcp_client(client_socket):
+    if protocol == "tcp":
+        if port not in tcp_servers:
+            tcp_servers[port] = []  # 해당 포트에 대한 서버 목록
+        tcp_servers[port].append(('0.0.0.0', port))
+        return jsonify({"ack": "successful"}), 200
+    elif protocol == "udp":
+        if port not in udp_servers:
+            udp_servers[port] = []  # 해당 포트에 대한 서버 목록
+        udp_servers[port].append(('0.0.0.0', port))
+        return jsonify({"ack": "successful"}), 200
+    else:
+        return jsonify({"ack": "failed", "msg": "Invalid protocol"}), 400
+
+# 서버 해제 처리 (Unregistration)
+@app.route('/unregister', methods=['POST'])
+def unregister_server():
+    data = request.json
+    protocol = data.get("protocol")
+    port = data.get("port")
+
+    if protocol == "tcp":
+        if port in tcp_servers and len(tcp_servers[port]) > 0:
+            tcp_servers[port].pop()
+            if len(tcp_servers[port]) == 0:
+                del tcp_servers[port]  # 해당 포트의 모든 서버가 해제된 경우 삭제
+            return jsonify({"ack": "successful"}), 200
+        else:
+            return jsonify({"ack": "failed", "msg": "No server to unregister"}), 400
+    elif protocol == "udp":
+        if port in udp_servers and len(udp_servers[port]) > 0:
+            udp_servers[port].pop()
+            if len(udp_servers[port]) == 0:
+                del udp_servers[port]  # 해당 포트의 모든 서버가 해제된 경우 삭제
+            return jsonify({"ack": "successful"}), 200
+        else:
+            return jsonify({"ack": "failed", "msg": "No server to unregister"}), 400
+    else:
+        return jsonify({"ack": "failed", "msg": "Invalid protocol"}), 400
+
+# TCP 요청을 라운드 로빈 방식으로 분배
+def handle_tcp_connection(client_socket, port):
+    global tcp_index
+    if port not in tcp_servers or len(tcp_servers[port]) == 0:
+        client_socket.send("No TCP servers available".encode())
+        client_socket.close()
+        return
+
+    # 라운드 로빈 방식으로 서버 선택
+    server = tcp_servers[port][tcp_index]
+    tcp_index = (tcp_index + 1) % len(tcp_servers[port])
+
     try:
-        # 다음 서버를 선택
-        server_ip, server_port = get_next_server()
-
-        # 선택된 서버에 연결
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-            server_socket.connect((server_ip, server_port))
-            
-            # 클라이언트로부터 데이터 수신
-            client_data = client_socket.recv(1024)
-
-            # 서버에 데이터 전송
-            server_socket.sendall(client_data)
-            
-            # 서버로부터 응답을 받아 클라이언트에 전달
-            server_data = server_socket.recv(1024)
-            client_socket.sendall(server_data)
-    
+            server_socket.connect(server)
+            data = client_socket.recv(1024)
+            server_socket.send(data)
+            response = server_socket.recv(1024)
+            client_socket.send(response)
+    except Exception as e:
+        client_socket.send(f"Error: {str(e)}".encode())
     finally:
         client_socket.close()
 
-# UDP 클라이언트 요청 처리
-def handle_udp_client(client_socket, client_address):
-    try:
-        # 다음 서버를 선택
-        server_ip, server_port = get_next_server()
-
-        # 클라이언트로부터 데이터 수신
-        client_data, addr = client_socket.recvfrom(1024)
-
-        # 선택된 서버로 데이터 전송
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server_socket:
-            server_socket.sendto(client_data, (server_ip, server_port))
-
-            # 서버로부터 응답을 받아 클라이언트에 전달
-            server_data, _ = server_socket.recvfrom(1024)
-            client_socket.sendto(server_data, client_address)
-    
-    finally:
-        client_socket.close()
-
+# TCP 로드 밸런서 서버 설정
 def tcp_load_balancer():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as lb_socket:
-        lb_socket.bind(('0.0.0.0', 12345))  # 로드 밸런서 TCP 포트
-        lb_socket.listen()
-        print("TCP Load Balancer Listening on port 12345...")
+        lb_socket.bind(('0.0.0.0', 8080))  # 로드 밸런서가 8080에서 대기
+        lb_socket.listen(5)
+        print("TCP Load Balancer is listening on port 8080")
 
         while True:
-            client_socket, addr = lb_socket.accept()
-            print(f"TCP Client connected from {addr}")
-            client_handler = threading.Thread(target=handle_tcp_client, args=(client_socket,))
-            client_handler.start()
+            client_socket, _ = lb_socket.accept()
+            # 라운드 로빈으로 80번 포트 처리 (예제에서는 포트 80을 고정으로 처리)
+            thread = threading.Thread(target=handle_tcp_connection, args=(client_socket, 80))
+            thread.start()
 
+# UDP 요청을 라운드 로빈 방식으로 분배
 def udp_load_balancer():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as lb_socket:
-        lb_socket.bind(('0.0.0.0', 12346))  # 로드 밸런서 UDP 포트
-        print("UDP Load Balancer Listening on port 12346...")
+        lb_socket.bind(('0.0.0.0', 8083))  # 로드 밸런서가 8083에서 대기
+        print("UDP Load Balancer is listening on port 8083")
 
         while True:
-            client_socket, client_address = lb_socket.recvfrom(1024)
-            print(f"UDP Client connected from {client_address}")
-            udp_handler = threading.Thread(target=handle_udp_client, args=(lb_socket, client_address))
-            udp_handler.start()
+            data, client_address = lb_socket.recvfrom(1024)
+            global udp_index
+            if 80 not in udp_servers or len(udp_servers[80]) == 0:
+                lb_socket.sendto("No UDP servers available".encode(), client_address)
+                continue
 
-# 각각의 로드 밸런서 (TCP/UDP) 서버를 실행
-if __name__ == "__main__":
+            # 라운드 로빈 방식으로 서버 선택
+            server = udp_servers[80][udp_index]
+            udp_index = (udp_index + 1) % len(udp_servers[80])
+
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server_socket:
+                    server_socket.sendto(data, server)
+                    response, _ = server_socket.recvfrom(1024)
+                    lb_socket.sendto(response, client_address)
+            except Exception as e:
+                lb_socket.sendto(f"Error: {str(e)}".encode(), client_address)
+
+if __name__ == '__main__':
+    # 플라스크 서버 스레드로 실행 (서버 등록 및 해제를 처리)
+    flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5001))
+    flask_thread.start()
+
+    # TCP 및 UDP 로드 밸런서 실행
     tcp_thread = threading.Thread(target=tcp_load_balancer)
     udp_thread = threading.Thread(target=udp_load_balancer)
-
     tcp_thread.start()
     udp_thread.start()
 
     tcp_thread.join()
     udp_thread.join()
-

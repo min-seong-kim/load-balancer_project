@@ -1,20 +1,20 @@
 import socket
 
-# 서버 설정
-HOST = '127.0.0.1'  # 서버의 로컬 IP 주소
-PORT = 65432        # 사용할 포트 번호
+def tcp_server():
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind(('0.0.0.0', 8081))  # 포트 8081에서 대기
+    server_socket.listen(5)
+    print("TCP Server is listening on port 8081")
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    s.bind((HOST, PORT))  # 소켓 바인딩
-    s.listen()            # 클라이언트의 연결 대기
-    print(f"TCP 서버가 {PORT} 포트에서 기다리고 있습니다.")
-    
-    conn, addr = s.accept()  # 클라이언트 연결 수락
-    with conn:
-        print('클라이언트와 연결됨:', addr)
-        while True:
-            data = conn.recv(1024)  # 데이터 수신
-            if not data:
-                break
-            conn.sendall(data)  # 받은 데이터를 그대로 클라이언트로 전송
+    while True:
+        client_socket, addr = server_socket.accept()
+        print(f"Connection from {addr}")
+        message = client_socket.recv(1024).decode()
+        print(f"Received message: {message}")
 
+        # 받은 메시지를 클라이언트로 다시 돌려보냄 (Echo)
+        client_socket.send(f"Echo: {message}".encode())
+        client_socket.close()
+
+if __name__ == "__main__":
+    tcp_server()

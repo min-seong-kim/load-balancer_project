@@ -1,16 +1,16 @@
 import socket
 
-# 서버 설정
-HOST = '127.0.0.1'  # 서버의 로컬 IP 주소
-PORT = 65433        # 사용할 포트 번호
+def udp_server():
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server_socket.bind(('0.0.0.0', 8082))  # 포트 8082에서 대기
+    print("UDP Server is listening on port 8082")
 
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-    s.bind((HOST, PORT))  # 소켓 바인딩
-    print(f"UDP 서버가 {PORT} 포트에서 기다리고 있습니다.")
-    
     while True:
-        data, addr = s.recvfrom(1024)  # 데이터 수신
-        print('클라이언트로부터 수신됨:', addr)
-        print('받은 데이터:', data.decode())
-        s.sendto(data, addr)  # 받은 데이터를 그대로 클라이언트로 전송
+        message, addr = server_socket.recvfrom(1024)
+        print(f"Received message from {addr}: {message.decode()}")
 
+        # 받은 메시지를 클라이언트로 다시 돌려보냄 (Echo)
+        server_socket.sendto(f"Echo: {message.decode()}".encode(), addr)
+
+if __name__ == "__main__":
+    udp_server()
