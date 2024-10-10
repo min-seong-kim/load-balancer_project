@@ -1,6 +1,7 @@
 import socket
 import threading
 from flask import Flask, request, jsonify
+import requests
 
 app = Flask(__name__)
 
@@ -29,6 +30,11 @@ def register_server():
             udp_servers[port] = []  # 해당 포트에 대한 서버 목록
         udp_servers[port].append(('0.0.0.0', port))
         return jsonify({"ack": "successful"}), 200
+    elif protocol == "rest":
+        if port not in rest_servers:
+            rest_servers[port] = []  # REST 서버 등록
+        rest_servers[port].append(('0.0.0.0', port))
+        return jsonify({"ack": "successful"}), 200
     else:
         return jsonify({"ack": "failed", "msg": "Invalid protocol"}), 400
 
@@ -43,7 +49,7 @@ def unregister_server():
         if port in tcp_servers and len(tcp_servers[port]) > 0:
             tcp_servers[port].pop()
             if len(tcp_servers[port]) == 0:
-                del tcp_servers[port]  # 해당 포트의 모든 서버가 해제된 경우 삭제
+                del tcp_servers[port]
             return jsonify({"ack": "successful"}), 200
         else:
             return jsonify({"ack": "failed", "msg": "No server to unregister"}), 400
@@ -51,12 +57,43 @@ def unregister_server():
         if port in udp_servers and len(udp_servers[port]) > 0:
             udp_servers[port].pop()
             if len(udp_servers[port]) == 0:
-                del udp_servers[port]  # 해당 포트의 모든 서버가 해제된 경우 삭제
+                del udp_servers[port]
+            return jsonify({"ack": "successful"}), 200
+        else:
+            return jsonify({"ack": "failed", "msg": "No server to unregister"}), 400
+    elif protocol == "rest":
+        if port in rest_servers and len(rest_servers[port]) > 0:
+            rest_servers[port].pop()
+            if len(rest_servers[port]) == 0:
+                del rest_servers[port]
             return jsonify({"ack": "successful"}), 200
         else:
             return jsonify({"ack": "failed", "msg": "No server to unregister"}), 400
     else:
         return jsonify({"ack": "failed", "msg": "Invalid protocol"}), 400
+
+# REST API 요청을 라운드 로빈 방식으로 분배
+@app.route('/api', methods=['GET', 'POST'])
+def api_request():
+    global rest_index
+    if not rest_servers:
+        return jsonify({"error": "No REST servers available"}), 503
+
+    # 라운드 로빈 방식으로 서버 선택
+    port = list(rest_servers.keys())[rest_index]
+    server = rest_servers[port][rest_index % len(rest_servers[port])]
+    rest_index = (rest_index + 1) % len(rest_servers)
+
+    # 요청을 선택된 서버로 프록시
+    try:
+        response = requests.request(
+            method=request.method,
+            url=f"http://{server[0]}:{server[1]}/api",
+            json=request.get_json() if request.method == 'POST' else None
+        )
+        return (response.content, response.status_code, response.headers.items())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # TCP 요청을 라운드 로빈 방식으로 분배
 def handle_tcp_connection(client_socket, port):
@@ -91,10 +128,10 @@ def tcp_load_balancer():
 
         while True:
             client_socket, _ = lb_socket.accept()
-            # 라운드 로빈으로 80번 포트 처리 (예제에서는 포트 80을 고정으로 처리)
             thread = threading.Thread(target=handle_tcp_connection, args=(client_socket, 80))
             thread.start()
 
+# UDP 요청을 라운드 로빈 방식으로 분배
 # UDP 요청을 라운드 로빈 방식으로 분배
 def udp_load_balancer():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as lb_socket:
@@ -104,13 +141,17 @@ def udp_load_balancer():
         while True:
             data, client_address = lb_socket.recvfrom(1024)
             global udp_index
-            if 80 not in udp_servers or len(udp_servers[80]) == 0:
+
+            # 클라이언트가 요청한 포트를 받아옴
+            client_port = client_address[1]
+
+            if client_port not in udp_servers or len(udp_servers[client_port]) == 0:
                 lb_socket.sendto("No UDP servers available".encode(), client_address)
                 continue
 
             # 라운드 로빈 방식으로 서버 선택
-            server = udp_servers[80][udp_index]
-            udp_index = (udp_index + 1) % len(udp_servers[80])
+            server = udp_servers[client_port][udp_index]
+            udp_index = (udp_index + 1) % len(udp_servers[client_port])
 
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server_socket:
@@ -119,6 +160,7 @@ def udp_load_balancer():
                     lb_socket.sendto(response, client_address)
             except Exception as e:
                 lb_socket.sendto(f"Error: {str(e)}".encode(), client_address)
+
 
 if __name__ == '__main__':
     # 플라스크 서버 스레드로 실행 (서버 등록 및 해제를 처리)
